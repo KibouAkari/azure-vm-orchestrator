@@ -1,0 +1,43 @@
+# -------------------------------
+# 1) Pflichtfelder (bitte ausfüllen)
+# -------------------------------
+subscription_id = "00000000-0000-0000-0000-000000000000"
+tenant_id       = "00000000-0000-0000-0000-000000000000"
+orchestrator_api_key = "replace-with-a-long-random-string"
+
+# -------------------------------
+# 2) Projekt / Umgebung
+# -------------------------------
+project_name = "azure-vm-orchestrator"
+environment  = "dev"
+location     = "switzerlandnorth"
+frontend_origin = "https://your-project.vercel.app"
+
+# -------------------------------
+# 3) Sicherheit
+# -------------------------------
+# Für mehr Sicherheit: eigene öffentliche IP eintragen, z.B. "84.75.10.20/32"
+# Für Test (unsicher): "0.0.0.0/0"
+allowed_client_cidr = "0.0.0.0/0"
+
+# -------------------------------
+# 4) Kosten / Limits
+# -------------------------------
+max_parallel_vms    = 3
+vm_lifetime_minutes = 60
+monthly_budget_chf  = 50
+
+# -------------------------------
+# 5) VM Defaults
+# -------------------------------
+vm_admin_username = "azureuser"
+vm_size_linux     = "Standard_B1s"
+vm_size_windows   = "Standard_B1s"
+
+# -------------------------------
+# 6) Optionale Tags
+# -------------------------------
+tags = {
+  owner       = "your-name"
+  cost_center = "sandbox"
+}

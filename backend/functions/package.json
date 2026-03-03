@@ -1,0 +1,23 @@
+{
+  "name": "azure-vm-orchestrator-functions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "start": "func start",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@azure/arm-compute": "^22.2.0",
+    "@azure/arm-network": "^35.0.0",
+    "@azure/functions": "^4.7.3",
+    "@azure/identity": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "typescript": "^5.8.2"
+  }
+}

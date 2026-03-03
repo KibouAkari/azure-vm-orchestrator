@@ -1,0 +1,22 @@
+.DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+terraform.tfvars
+
+# Node
+node_modules/
+frontend/web/node_modules/
+backend/functions/node_modules/
+
+# Build outputs
+frontend/web/.next/
+backend/functions/dist/
+
+# Env files
+.env
+.env.local
+backend/functions/local.settings.json
