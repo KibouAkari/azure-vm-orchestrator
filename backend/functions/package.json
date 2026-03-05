@@ -11,10 +11,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@azure/arm-storage": "^19.0.0",
     "@azure/arm-compute": "^22.2.0",
     "@azure/arm-network": "^35.0.0",
     "@azure/functions": "^4.7.3",
-    "@azure/identity": "^4.7.0"
+    "@azure/identity": "^4.7.0",
+    "@azure/storage-blob": "^12.27.0"
   },
   "devDependencies": {
     "@types/node": "^22.12.0",

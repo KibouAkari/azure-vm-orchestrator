@@ -6,11 +6,29 @@ type VmSummary = {
   name: string;
   osType: "windows" | "linux";
   image: string;
+  topicId?: string;
   vmSize: string;
   username: string;
+  password?: string;
   expiresAt: string;
   status: "running" | "deallocated" | "creating" | "failed";
   publicIp?: string;
+};
+
+type Topic = {
+  id: string;
+  label: string;
+  type: "azure" | "custom";
+  allowCustomCredentials: boolean;
+  images: Array<{
+    id: string;
+    label: string;
+    osType: "windows" | "linux";
+    sourceMode: "marketplace" | "custom-image";
+    imageId: string;
+    fixedUsername?: string;
+    fixedPassword?: string;
+  }>;
 };
 
 type VmCatalog = {
@@ -23,12 +41,8 @@ type VmCatalog = {
     sku?: string;
     version?: string;
   }>;
+  topics?: Topic[];
   vmSizes: string[];
-};
-
-type ViewerVm = {
-  name: string;
-  url: string;
 };
 
 type ChaosMode = "none" | "errors" | "void" | "penguins" | "rickroll" | "matrix" | "glitchrain";
@@ -63,6 +77,16 @@ type GlitchLine = {
   delay: number;
 };
 
+type ViewerStatus = {
+  ready: boolean;
+  progress: number;
+  phase: string;
+  message: string;
+  osType: "linux" | "windows";
+  viewerUrl?: string;
+  rdp?: string;
+};
+
 type VmApiPayload = VmSummary[] | { items?: VmSummary[] };
 type CatalogApiPayload =
   | VmCatalog
@@ -73,17 +97,19 @@ type CatalogApiPayload =
         label?: string;
         osType?: "windows" | "linux";
       }>;
+      topics?: Topic[];
       vmSizes?: string[];
     };
 
 const initialForm = {
   name: "",
-  image: "ubuntu2204",
-  vmSize: "Standard_B2s",
+  topicId: "azure",
+  image: "ubuntu-24.04",
   username: "azureuser",
-  password: "",
-  publicKey: ""
+  password: ""
 };
+
+const lowCostVmSize = "Standard_B2s";
 
 const dragStorageKey = "vm-order";
 
@@ -123,8 +149,30 @@ function viewerUrl(ip?: string, osType?: VmSummary["osType"]): string {
   if (!ip) {
     return "";
   }
-  const defaultPort = osType === "windows" ? "6080" : "6080";
-  return `https://${ip}:${defaultPort}/vnc.html?autoconnect=true&resize=remote`;
+
+  const isPublicIp = !/^10\.|^172\.(1[6-9]|2\d|3[0-1])\.|^192\.168\./.test(ip);
+  if (!isPublicIp) {
+    return "";
+  }
+
+  if (osType === "linux") {
+    const sslipHost = `${ip.replace(/\./g, "-")}.sslip.io`;
+    return `https://${sslipHost}/guacamole/`;
+  }
+
+  return `http://${ip}:6080/vnc.html?autoconnect=true&resize=remote`;
+}
+
+function formatRemainingTime(expiresAtIso: string, nowMs: number) {
+  const expiresAtMs = new Date(expiresAtIso).getTime();
+  const remainingMs = Math.max(0, expiresAtMs - nowMs);
+  const totalSeconds = Math.floor(remainingMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours.toString().padStart(2, "0")}:${minutes
+    .toString()
+    .padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function normalizeVmPayload(payload: VmApiPayload): VmSummary[] {
@@ -137,6 +185,36 @@ function normalizeVmPayload(payload: VmApiPayload): VmSummary[] {
   }
 
   return [];
+}
+
+function canonicalVmName(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function sanitizeVmName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/--+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 30);
+}
+
+function dedupeVmsByName(items: VmSummary[]) {
+  const seen = new Set<string>();
+  const deduped: VmSummary[] = [];
+
+  for (const item of items) {
+    const key = canonicalVmName(item.name);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(item);
+  }
+
+  return deduped;
 }
 
 function normalizeCatalogPayload(payload: CatalogApiPayload): VmCatalog {
@@ -153,12 +231,29 @@ function normalizeCatalogPayload(payload: CatalogApiPayload): VmCatalog {
     osType: image.osType ?? "linux"
   }));
 
+  const rawTopics = Array.isArray(payload?.topics) ? payload.topics : [];
+  const topics = rawTopics.length
+    ? rawTopics
+    : [
+        {
+          id: "azure",
+          label: "Azure",
+          type: "azure" as const,
+          allowCustomCredentials: true,
+          images: images.map((image) => ({
+            id: image.key,
+            label: image.label,
+            osType: image.osType,
+            sourceMode: "marketplace" as const,
+            imageId: image.key
+          }))
+        }
+      ];
+
   return {
     images: images.filter((image) => image.key.length > 0),
-    vmSizes:
-      Array.isArray(payload?.vmSizes) && payload.vmSizes.length > 0
-        ? payload.vmSizes
-        : ["Standard_B2s", "Standard_B2ms", "Standard_D2s_v5"]
+    topics,
+    vmSizes: [lowCostVmSize]
   };
 }
 
@@ -170,9 +265,10 @@ export function VmDashboard() {
   const [secondaryVmName, setSecondaryVmName] = useState<string | null>(null);
   const [splitView, setSplitView] = useState(false);
   const [selectedImagePreview, setSelectedImagePreview] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creatingCount, setCreatingCount] = useState(0);
+  const [pendingCreations, setPendingCreations] = useState<VmSummary[]>([]);
   const [showCreatePanel, setShowCreatePanel] = useState(true);
-  const [updatingVm, setUpdatingVm] = useState<string | null>(null);
+  const [pendingActions, setPendingActions] = useState<Set<string>>(new Set());
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState(initialForm);
@@ -184,13 +280,30 @@ export function VmDashboard() {
   const [penguins, setPenguins] = useState<PenguinDrop[]>([]);
   const [matrixChars, setMatrixChars] = useState<MatrixChar[]>([]);
   const [glitchLines, setGlitchLines] = useState<GlitchLine[]>([]);
+  const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
+  const [nowMs, setNowMs] = useState(Date.now());
+  const [refreshing, setRefreshing] = useState(false);
+  const [viewerStatusByVm, setViewerStatusByVm] = useState<Record<string, ViewerStatus>>({});
+  const [viewerUrlByVm, setViewerUrlByVm] = useState<Record<string, string>>({});
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [catalogFetchedAt, setCatalogFetchedAt] = useState(0);
+
+  const visibleVms = useMemo(() => {
+    if (pendingCreations.length === 0) {
+      return dedupeVmsByName(vms);
+    }
+
+    const existing = new Set(vms.map((vm) => canonicalVmName(vm.name)));
+    const optimistic = pendingCreations.filter((vm) => !existing.has(canonicalVmName(vm.name)));
+    return dedupeVmsByName([...optimistic, ...vms]);
+  }, [pendingCreations, vms]);
 
   const orderedVms = useMemo(() => {
     if (orderedNames.length === 0) {
-      return vms;
+      return visibleVms;
     }
 
-    const vmMap = new Map(vms.map((vm) => [vm.name, vm]));
+    const vmMap = new Map(visibleVms.map((vm) => [vm.name, vm]));
     const ordered: VmSummary[] = [];
 
     orderedNames.forEach((name) => {
@@ -203,20 +316,13 @@ export function VmDashboard() {
 
     vmMap.forEach((vm) => ordered.push(vm));
     return ordered;
-  }, [orderedNames, vms]);
+  }, [orderedNames, visibleVms]);
 
   const activeVm = orderedVms.find((vm) => vm.name === activeVmName) ?? orderedVms[0] ?? null;
   const secondaryVm =
     splitView && secondaryVmName
       ? orderedVms.find((vm) => vm.name === secondaryVmName) ?? null
       : null;
-
-  const openViewerVms: ViewerVm[] = [activeVm, secondaryVm]
-    .filter((vm): vm is VmSummary => Boolean(vm && vm.publicIp))
-    .map((vm) => ({
-      name: vm.name,
-      url: viewerUrl(vm.publicIp, vm.osType)
-    }));
 
   useEffect(() => {
     const savedOrder = localStorage.getItem(dragStorageKey);
@@ -231,17 +337,142 @@ export function VmDashboard() {
   }, []);
 
   useEffect(() => {
+    const targetVms = (splitView ? [activeVm, secondaryVm] : [activeVm]).filter(
+      (vm): vm is VmSummary => Boolean(vm && vm.publicIp && vm.status === "running")
+    );
+
+    if (targetVms.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      await Promise.all(
+        targetVms.map(async (vm) => {
+          try {
+            const response = await fetch(`/api/orchestrator/vms/${vm.name}/viewer-status?t=${Date.now()}`, {
+              cache: "no-store"
+            });
+
+            if (!response.ok) {
+              return;
+            }
+
+            const status = (await response.json()) as ViewerStatus;
+            if (cancelled) {
+              return;
+            }
+
+            setViewerStatusByVm((current) => ({
+              ...current,
+              [canonicalVmName(vm.name)]: status
+            }));
+
+            if (status.ready && status.viewerUrl) {
+              const key = canonicalVmName(vm.name);
+              setViewerUrlByVm((current) => {
+                if (current[key]) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  [key]: status.viewerUrl ?? ""
+                };
+              });
+            }
+          } catch {
+            if (cancelled) {
+              return;
+            }
+            setViewerStatusByVm((current) => ({
+              ...current,
+              [canonicalVmName(vm.name)]: {
+                ready: false,
+                progress: 20,
+                phase: "checking",
+                message: "Checking viewer services...",
+                osType: vm.osType
+              }
+            }));
+          }
+        })
+      );
+    };
+
+    void poll();
+    const interval = setInterval(() => void poll(), 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeVm, secondaryVm, splitView]);
+
+  useEffect(() => {
     if (orderedNames.length > 0) {
       localStorage.setItem(dragStorageKey, JSON.stringify(orderedNames));
     }
   }, [orderedNames]);
 
   useEffect(() => {
+    const topic = (catalog?.topics ?? []).find((entry) => entry.id === form.topicId);
+    if (topic?.images.length) {
+      const selectedImage = topic.images.find((image) => image.id === form.image);
+      setSelectedImagePreview(selectedImage?.label ?? "");
+      return;
+    }
+
     if (catalog?.images.length) {
       const selectedImage = catalog.images.find((image) => image.key === form.image);
       setSelectedImagePreview(selectedImage?.label ?? "");
     }
-  }, [catalog, form.image]);
+  }, [catalog, form.image, form.topicId]);
+
+  useEffect(() => {
+    if (!catalog?.topics?.length) {
+      return;
+    }
+
+    const topic = catalog.topics.find((entry) => entry.id === form.topicId) ?? catalog.topics[0];
+    if (!topic) {
+      return;
+    }
+
+    const hasImage = topic.images.some((image) => image.id === form.image);
+    const nextImage = hasImage ? form.image : topic.images[0]?.id ?? "";
+
+    setForm((current) => {
+      const next = { ...current };
+      let changed = false;
+      if (current.topicId !== topic.id) {
+        next.topicId = topic.id;
+        changed = true;
+      }
+      if (nextImage && current.image !== nextImage) {
+        next.image = nextImage;
+        changed = true;
+      }
+      if (topic.type === "custom") {
+        const image = topic.images.find((entry) => entry.id === (nextImage || current.image));
+        const nextUsername = image?.fixedUsername ?? current.username;
+        const nextPassword = image?.fixedPassword ?? current.password;
+        if (next.username !== nextUsername) {
+          next.username = nextUsername;
+          changed = true;
+        }
+        if (next.password !== nextPassword) {
+          next.password = nextPassword;
+          changed = true;
+        }
+        if (next.name !== "") {
+          next.name = "";
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [catalog, form.topicId, form.image]);
 
   useEffect(() => {
     if (!activeVmName && orderedVms[0]) {
@@ -290,42 +521,149 @@ export function VmDashboard() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [chaosMode]);
 
-  async function loadState(initial: boolean) {
-    try {
-      const [catalogRes, vmRes] = await Promise.all([
-        fetch("/api/orchestrator/catalog"),
-        fetch("/api/orchestrator/vms")
-      ]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
 
-      if (!catalogRes.ok || !vmRes.ok) {
+    return () => clearInterval(timer);
+  }, []);
+
+  async function loadState(initial: boolean) {
+    if (!initial) {
+      setRefreshing(true);
+    }
+
+    try {
+      const shouldRefreshCatalog =
+        initial || !catalog || Date.now() - catalogFetchedAt > 60_000;
+
+      const vmRes = await fetch(`/api/orchestrator/vms?t=${Date.now()}`, { cache: "no-store" });
+      if (!vmRes.ok) {
         throw new Error("Could not load data.");
       }
-
-      const catalogData = normalizeCatalogPayload((await catalogRes.json()) as CatalogApiPayload);
       const vmData = normalizeVmPayload((await vmRes.json()) as VmApiPayload);
 
-      setCatalog(catalogData);
-      setVms(vmData);
+      const dedupedVmData = dedupeVmsByName(vmData);
+      setVms(dedupedVmData);
+      setViewerStatusByVm((current) => {
+        const next: Record<string, ViewerStatus> = {};
+        dedupedVmData.forEach((vm) => {
+          const key = canonicalVmName(vm.name);
+          if (current[key]) {
+            next[key] = current[key];
+          }
+        });
+        return next;
+      });
+      setViewerUrlByVm((current) => {
+        const next: Record<string, string> = {};
+        dedupedVmData.forEach((vm) => {
+          const key = canonicalVmName(vm.name);
+          if (current[key]) {
+            next[key] = current[key];
+          }
+        });
+        return next;
+      });
+      setPendingCreations((current) =>
+        current.filter(
+          (pending) => !dedupedVmData.some((vm) => canonicalVmName(vm.name) === canonicalVmName(pending.name))
+        )
+      );
 
-      if (initial && vmData.length > 0 && !activeVmName) {
-        setActiveVmName(vmData[0].name);
+      if (initial && dedupedVmData.length > 0 && !activeVmName) {
+        setActiveVmName(dedupedVmData[0].name);
       }
 
       if (initial && orderedNames.length === 0) {
-        setOrderedNames(vmData.map((vm) => vm.name));
+        setOrderedNames(dedupedVmData.map((vm) => vm.name));
+      }
+
+      if (shouldRefreshCatalog) {
+        const catalogRes = await fetch(`/api/orchestrator/catalog?t=${Date.now()}`, { cache: "no-store" });
+        if (catalogRes.ok) {
+          const catalogData = normalizeCatalogPayload((await catalogRes.json()) as CatalogApiPayload);
+          setCatalog(catalogData);
+          setCatalogFetchedAt(Date.now());
+        }
       }
 
       setError(null);
     } catch (loadError) {
       setError((loadError as Error).message);
+    } finally {
+      if (!initial) {
+        setRefreshing(false);
+      }
     }
   }
 
   async function createVm(event: FormEvent) {
     event.preventDefault();
-    setCreating(true);
+    setCreatingCount((current) => current + 1);
     setFeedback(null);
     setError(null);
+
+    const topic = (catalog?.topics ?? []).find((entry) => entry.id === form.topicId) ?? null;
+    const isAzureTopic = (topic?.type ?? "azure") === "azure";
+
+    if (isAzureTopic && !form.name.trim()) {
+      setError("VM name is required for Azure.");
+      setCreatingCount((current) => Math.max(0, current - 1));
+      return;
+    }
+
+    if (!form.image) {
+      setError("Please select an image.");
+      setCreatingCount((current) => Math.max(0, current - 1));
+      return;
+    }
+
+    const generatedName = `${form.topicId || "vm"}-${Date.now().toString().slice(-6)}`;
+    const requestedName = isAzureTopic ? form.name : generatedName;
+    const sanitizedName = sanitizeVmName(requestedName);
+    const optimisticName = sanitizedName.length > 0 ? sanitizedName : requestedName.trim();
+    const selectedTopicImage = topic?.images.find((image) => image.id === form.image);
+    const effectiveUsername =
+      topic?.type === "custom" ? selectedTopicImage?.fixedUsername ?? form.username : form.username;
+    const effectivePassword =
+      topic?.type === "custom" ? selectedTopicImage?.fixedPassword ?? form.password : form.password;
+
+    const optimisticVm: VmSummary = {
+      name: optimisticName,
+      osType: selectedTopicImage?.osType ?? (form.image.includes("win") ? "windows" : "linux"),
+      image: form.image,
+      topicId: form.topicId,
+      vmSize: lowCostVmSize,
+      username: effectiveUsername,
+      password: topic?.type === "custom" ? effectivePassword : "",
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      status: "creating",
+      publicIp: ""
+    };
+
+    setPendingCreations((current) => {
+      if (current.some((vm) => vm.name === optimisticVm.name)) {
+        return current;
+      }
+      return [optimisticVm, ...current];
+    });
+    setViewerStatusByVm((current) => ({
+      ...current,
+      [canonicalVmName(optimisticName)]: {
+        ready: false,
+        progress: 8,
+        phase: "creating",
+        message: "Allocating VM and network...",
+        osType: optimisticVm.osType
+      }
+    }));
+    setViewerUrlByVm((current) => {
+      const next = { ...current };
+      delete next[canonicalVmName(optimisticName)];
+      return next;
+    });
 
     try {
       const response = await fetch("/api/orchestrator/vms", {
@@ -334,12 +672,12 @@ export function VmDashboard() {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          name: form.name,
+          name: isAzureTopic ? optimisticName : undefined,
+          topicId: form.topicId,
           image: form.image,
-          vmSize: form.vmSize,
-          username: form.username,
-          password: form.password || undefined,
-          publicKey: form.publicKey || undefined
+          vmSize: lowCostVmSize,
+          username: isAzureTopic ? form.username : undefined,
+          password: isAzureTopic ? form.password || undefined : undefined
         })
       });
 
@@ -348,18 +686,117 @@ export function VmDashboard() {
         throw new Error(details.error ?? "Failed to create VM.");
       }
 
-      setForm(initialForm);
-      setFeedback("VM creation started. The list will refresh automatically.");
+      setForm((current) => ({
+        ...initialForm,
+        topicId: current.topicId,
+        image: (catalog?.topics ?? []).find((entry) => entry.id === current.topicId)?.images[0]?.id ?? initialForm.image
+      }));
+      setFeedback("VM creation started. You can already queue another VM now.");
       await loadState(false);
     } catch (createError) {
       setError((createError as Error).message);
     } finally {
-      setCreating(false);
+      setCreatingCount((current) => Math.max(0, current - 1));
+    }
+  }
+
+  function downloadRdpFile(vm: VmSummary) {
+    if (!vm.publicIp) {
+      setError("Public IP is not ready yet.");
+      return;
+    }
+
+    const content = [
+      "screen mode id:i:2",
+      "use multimon:i:0",
+      "desktopwidth:i:1920",
+      "desktopheight:i:1080",
+      "session bpp:i:32",
+      `full address:s:${vm.publicIp}:3389`,
+      `username:s:${vm.username}`
+    ].join("\r\n");
+
+    const blob = new Blob([content], { type: "application/x-rdp" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${vm.name}.rdp`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleTransferDrop(files: FileList | null) {
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    setDroppedFiles((current) => [...current, ...Array.from(files)]);
+    setFeedback(`${files.length} file(s) added to transfer staging.`);
+  }
+
+  async function uploadFilesToVm(vm: VmSummary) {
+    if (droppedFiles.length === 0) {
+      setError("Please select at least one file first.");
+      return;
+    }
+
+    setUploadingFiles(true);
+    setError(null);
+    setFeedback(null);
+
+    try {
+      for (const file of droppedFiles) {
+        const contentBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const value = typeof reader.result === "string" ? reader.result : "";
+            const marker = "base64,";
+            const idx = value.indexOf(marker);
+            if (idx === -1) {
+              reject(new Error(`Failed to encode ${file.name}`));
+              return;
+            }
+            resolve(value.slice(idx + marker.length));
+          };
+          reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+          reader.readAsDataURL(file);
+        });
+
+        const response = await fetch(`/api/orchestrator/vms/${vm.name}/files`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            fileName: file.name,
+            contentBase64
+          })
+        });
+
+        if (!response.ok) {
+          const details = await response.json().catch(() => ({}));
+          throw new Error(details.error ?? `Upload failed for ${file.name}`);
+        }
+      }
+
+      setFeedback(`Uploaded ${droppedFiles.length} file(s) to ${vm.name} Downloads folder.`);
+      setDroppedFiles([]);
+    } catch (uploadError) {
+      setError((uploadError as Error).message);
+    } finally {
+      setUploadingFiles(false);
     }
   }
 
   async function invokeVmAction(vmName: string, action: "start" | "stop" | "delete" | "extend") {
-    setUpdatingVm(vmName + action);
+    const actionToken = `${vmName}:${action}`;
+    setPendingActions((current) => {
+      const next = new Set(current);
+      next.add(actionToken);
+      return next;
+    });
     setFeedback(null);
     setError(null);
 
@@ -373,12 +810,47 @@ export function VmDashboard() {
         throw new Error(details.error ?? `Action ${action} failed.`);
       }
 
+      if (action === "delete") {
+        setVms((current) => current.filter((vm) => canonicalVmName(vm.name) !== canonicalVmName(vmName)));
+        setPendingCreations((current) =>
+          current.filter((vm) => canonicalVmName(vm.name) !== canonicalVmName(vmName))
+        );
+        setViewerStatusByVm((current) => {
+          const next = { ...current };
+          delete next[canonicalVmName(vmName)];
+          return next;
+        });
+        setViewerUrlByVm((current) => {
+          const next = { ...current };
+          delete next[canonicalVmName(vmName)];
+          return next;
+        });
+        setOrderedNames((current) => current.filter((name) => canonicalVmName(name) !== canonicalVmName(vmName)));
+        setActiveVmName((current) => {
+          if (current && canonicalVmName(current) !== canonicalVmName(vmName)) {
+            return current;
+          }
+          const next = orderedVms.find((vm) => canonicalVmName(vm.name) !== canonicalVmName(vmName));
+          return next?.name ?? null;
+        });
+        setSecondaryVmName((current) =>
+          current && canonicalVmName(current) === canonicalVmName(vmName) ? null : current
+        );
+        setFeedback(`VM ${vmName} terminated.`);
+        void loadState(false);
+        return;
+      }
+
       setFeedback(`Action ${action} started for ${vmName}.`);
       await loadState(false);
     } catch (actionError) {
       setError((actionError as Error).message);
     } finally {
-      setUpdatingVm(null);
+      setPendingActions((current) => {
+        const next = new Set(current);
+        next.delete(actionToken);
+        return next;
+      });
     }
   }
 
@@ -499,8 +971,17 @@ export function VmDashboard() {
     setGlitchLines([]);
   }
 
-  const imageOptions = catalog?.images ?? [];
-  const vmSizeOptions = catalog?.vmSizes ?? [];
+  const topics = catalog?.topics ?? [];
+  const selectedTopic = topics.find((topic) => topic.id === form.topicId) ?? topics[0] ?? null;
+  const imageOptions =
+    selectedTopic?.images.map((image) => ({
+      key: image.id,
+      label: image.label,
+      osType: image.osType
+    })) ??
+    catalog?.images ?? [];
+  const vmSizeOptions = catalog?.vmSizes ?? [lowCostVmSize];
+  const viewerConnected = Boolean(activeVm?.publicIp && activeVm.status === "running");
 
   return (
     <div className="pm-shell">
@@ -510,9 +991,12 @@ export function VmDashboard() {
           <p>Simple Control Panel • Drag & Drop links • Live VM actions</p>
         </div>
         <div className="pm-top-actions">
-          <button className="btn btn-ghost" onClick={() => void loadState(false)}>
-            Refresh
+          <button className="btn btn-ghost" onClick={() => void loadState(false)} disabled={refreshing}>
+            {refreshing ? "Refreshing..." : "Refresh"}
           </button>
+          <a className="btn btn-ghost" href="/images">
+            Image Menu
+          </a>
           <button className="btn btn-chaos" onClick={triggerChaos}>
             CHAOS v3
           </button>
@@ -540,6 +1024,26 @@ export function VmDashboard() {
             {showCreatePanel ? (
               <form className="pm-form" onSubmit={createVm}>
               <label>
+                Bereich
+                <select
+                  value={form.topicId}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      topicId: event.target.value
+                    }))
+                  }
+                >
+                  {(catalog?.topics ?? []).map((topic) => (
+                    <option key={topic.id} value={topic.id}>
+                      {topic.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedTopic?.type === "azure" ? (
+              <label>
                 Name
                 <input
                   required
@@ -549,9 +1053,15 @@ export function VmDashboard() {
                   pattern="[a-zA-Z0-9-]{3,24}"
                 />
               </label>
+              ) : (
+                <label>
+                  Aufgabe/Template
+                  <input value={selectedTopic?.label ?? "Custom"} readOnly />
+                </label>
+              )}
 
               <label>
-                OS Image
+                {selectedTopic?.type === "azure" ? "OS Image" : "Hinterlegte VM"}
                 <select
                   value={form.image}
                   onChange={(event) => setForm((current) => ({ ...current, image: event.target.value }))}
@@ -565,49 +1075,52 @@ export function VmDashboard() {
                 {selectedImagePreview ? <small>{selectedImagePreview}</small> : null}
               </label>
 
-              <label>
-                VM Size
-                <select
-                  value={form.vmSize}
-                  onChange={(event) => setForm((current) => ({ ...current, vmSize: event.target.value }))}
-                >
-                  {vmSizeOptions.map((size) => (
-                    <option key={size} value={size}>
-                      {size}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {selectedTopic?.type === "azure" ? (
+                <label>
+                  VM Size (fixed low-cost)
+                  <input value={vmSizeOptions[0] ?? lowCostVmSize} readOnly />
+                </label>
+              ) : null}
 
-              <label>
-                Username
-                <input
-                  required
-                  value={form.username}
-                  onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
-                />
-              </label>
+              {selectedTopic?.type === "azure" ? (
+                <>
+                  <label>
+                    Username
+                    <input
+                      required
+                      value={form.username}
+                      onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
+                    />
+                  </label>
 
-              <label>
-                Password (Windows or optional for Linux)
-                <input
-                  type="password"
-                  value={form.password}
-                  onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
-                />
-              </label>
+                  <label>
+                    Password (Windows oder optional Linux)
+                    <input
+                      type="password"
+                      value={form.password}
+                      onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label>
+                    Vorgegebenes Username
+                    <input value={form.username || "(auto)"} readOnly />
+                  </label>
+                  <label>
+                    Vorgegebenes Password
+                    <input value={form.password || "(auto)"} readOnly />
+                  </label>
+                </>
+              )}
 
-              <label>
-                SSH Public Key (Linux optional)
-                <textarea
-                  rows={3}
-                  value={form.publicKey}
-                  onChange={(event) => setForm((current) => ({ ...current, publicKey: event.target.value }))}
-                />
-              </label>
-
-              <button className="btn btn-primary" type="submit" disabled={creating || !catalog}>
-                {creating ? "Creating..." : "Create VM"}
+              <button className="btn btn-primary" type="submit" disabled={!catalog}>
+                {creatingCount > 0
+                  ? `Create VM (${creatingCount} in progress)`
+                  : selectedTopic?.type === "azure"
+                    ? "Create VM"
+                    : "Start Aufgabe-VM"}
               </button>
               </form>
             ) : (
@@ -636,9 +1149,8 @@ export function VmDashboard() {
                     <span className="pm-dot" data-status={vm.status} />
                     <span className="pm-vm-main">{vm.name}</span>
                     <span className="pm-vm-meta">
-                      {vm.osType.toUpperCase()} • {vm.vmSize}
+                      {vm.osType.toUpperCase()} • {(vm.topicId ?? "azure").toUpperCase()}
                     </span>
-                    <span className="pm-vm-meta">Expires {new Date(vm.expiresAt).toLocaleString()}</span>
                   </button>
                 );
               })}
@@ -654,28 +1166,28 @@ export function VmDashboard() {
                 <div className="pm-actions">
                   <button
                     className="btn btn-ghost"
-                    disabled={Boolean(updatingVm)}
+                    disabled={pendingActions.has(`${activeVm.name}:start`)}
                     onClick={() => void invokeVmAction(activeVm.name, "start")}
                   >
                     Resume
                   </button>
                   <button
                     className="btn btn-ghost"
-                    disabled={Boolean(updatingVm)}
+                    disabled={pendingActions.has(`${activeVm.name}:stop`)}
                     onClick={() => void invokeVmAction(activeVm.name, "stop")}
                   >
                     Pause
                   </button>
                   <button
                     className="btn btn-ghost"
-                    disabled={Boolean(updatingVm)}
+                    disabled={pendingActions.has(`${activeVm.name}:extend`)}
                     onClick={() => void invokeVmAction(activeVm.name, "extend")}
                   >
                     Extend +2h
                   </button>
                   <button
                     className="btn btn-danger"
-                    disabled={Boolean(updatingVm)}
+                    disabled={pendingActions.has(`${activeVm.name}:delete`)}
                     onClick={() => void invokeVmAction(activeVm.name, "delete")}
                   >
                     Terminate
@@ -685,19 +1197,22 @@ export function VmDashboard() {
             </div>
 
             {activeVm ? (
-              <div className="pm-vm-details">
-                <p>Status: {activeVm.status}</p>
-                <p>Image: {activeVm.image}</p>
-                <p>Public IP: {activeVm.publicIp ?? "pending"}</p>
-                <p>Auto-shutdown: {new Date(activeVm.expiresAt).toLocaleString()}</p>
-                <p>Budget mode: Pause reduces compute costs.</p>
+              <div className="pm-vm-details pm-vm-details-cool">
+                <span className="pm-chip">Status: {activeVm.status === "creating" ? "creating" : activeVm.status}</span>
+                <span className="pm-chip">Bereich: {(activeVm.topicId ?? "azure").toUpperCase()}</span>
+                <span className="pm-chip">Image: {activeVm.image}</span>
+                <span className="pm-chip">IP: {activeVm.publicIp ?? "pending"}</span>
+                <span className="pm-chip">Username: {activeVm.username || "(pending)"}</span>
+                {activeVm.password ? <span className="pm-chip">Password: {activeVm.password}</span> : null}
+                <span className="pm-chip">Shutdown: {new Date(activeVm.expiresAt).toLocaleTimeString()}</span>
+                <span className="pm-chip pm-chip-accent">Time left: {formatRemainingTime(activeVm.expiresAt, nowMs)}</span>
               </div>
             ) : (
               <p className="pm-muted">Create or select a VM to see details.</p>
             )}
           </div>
 
-          {activeVm ? <div className="pm-card pm-viewer-card">
+          {activeVm ? <div className={`pm-card pm-viewer-card ${viewerConnected ? "connected" : ""}`}>
             <div className="pm-viewer-head">
               <h2>Viewer</h2>
               <div className="pm-viewer-actions">
@@ -734,7 +1249,13 @@ export function VmDashboard() {
                   return null;
                 }
 
-                const url = viewerUrl(vm.publicIp, vm.osType);
+                const key = canonicalVmName(vm.name);
+                const viewerStatus = viewerStatusByVm[key];
+                const stableViewerUrl = viewerUrlByVm[key];
+                const url = stableViewerUrl || viewerStatus?.viewerUrl || viewerUrl(vm.publicIp, vm.osType);
+                const viewerReady = Boolean(viewerStatus?.ready);
+                const progress = vm.status === "creating" ? 12 : Math.max(12, Math.min(100, viewerStatus?.progress ?? 22));
+                const progressText = viewerStatus?.message ?? "Preparing viewer services...";
 
                 return (
                   <div className="pm-viewer-instance" key={vm.name + index}>
@@ -742,19 +1263,77 @@ export function VmDashboard() {
                       <span>{vm.name}</span>
                       {url ? (
                         <a href={url} target="_blank" rel="noreferrer" className="pm-open-link">
-                          Open noVNC in new tab
+                          Open viewer in new tab
                         </a>
                       ) : null}
                     </div>
-                    {url ? (
-                      <iframe
-                        title={`viewer-${vm.name}`}
-                        src={url}
-                        allow="fullscreen; clipboard-read; clipboard-write; autoplay"
-                        allowFullScreen
-                      />
+                    {!vm.publicIp || vm.status === "creating" ? (
+                      <div className="pm-loading-box">
+                        <div className="pm-spinner" />
+                        <p className="pm-muted">VM is provisioning. Viewer will open automatically once ready.</p>
+                        <div className="pm-progress-wrap">
+                          <div className="pm-progress-bar" style={{ width: `${progress}%` }} />
+                        </div>
+                        <p className="pm-muted">{progress}% • {progressText}</p>
+                      </div>
+                    ) : vm.osType === "windows" ? (
+                      <div className="pm-remote-box">
+                        {!viewerReady ? (
+                          <>
+                            <div className="pm-spinner" />
+                            <p className="pm-muted">Preparing Windows viewer session...</p>
+                            <div className="pm-progress-wrap">
+                              <div className="pm-progress-bar" style={{ width: `${progress}%` }} />
+                            </div>
+                            <p className="pm-muted">{progress}% • {progressText}</p>
+                            <p className="pm-remote-line">RDP fallback: {vm.publicIp ? `${vm.publicIp}:3389` : "private"}</p>
+                          </>
+                        ) : (
+                          <iframe
+                            title={`viewer-${vm.name}`}
+                            src={url}
+                            allow="fullscreen; clipboard-read; clipboard-write; autoplay"
+                            tabIndex={0}
+                            onLoad={(event) => {
+                              try {
+                                (event.currentTarget as HTMLIFrameElement).focus();
+                              } catch {
+                                // ignore focus errors
+                              }
+                            }}
+                            allowFullScreen
+                          />
+                        )}
+                      </div>
                     ) : (
-                      <p className="pm-muted">Viewer will be available as soon as a public IP is assigned.</p>
+                      <>
+                        {!viewerReady ? (
+                          <div className="pm-loading-box">
+                            <div className="pm-spinner" />
+                            <p className="pm-muted">Linux uses RDP Web Gateway (Guacamole).</p>
+                            <p className="pm-remote-line">Preparing automatic session login...</p>
+                            <div className="pm-progress-wrap">
+                              <div className="pm-progress-bar" style={{ width: `${progress}%` }} />
+                            </div>
+                            <p className="pm-muted">{progress}% • {progressText}</p>
+                          </div>
+                        ) : (
+                          <iframe
+                            title={`viewer-${vm.name}`}
+                            src={url}
+                            allow="fullscreen; clipboard-read; clipboard-write; autoplay"
+                            tabIndex={0}
+                            onLoad={(event) => {
+                              try {
+                                (event.currentTarget as HTMLIFrameElement).focus();
+                              } catch {
+                                // ignore focus errors
+                              }
+                            }}
+                            allowFullScreen
+                          />
+                        )}
+                      </>
                     )}
                   </div>
                 );
@@ -762,14 +1341,51 @@ export function VmDashboard() {
             </div>
 
             <div className="pm-clipboard-panel">
-              <h3>noVNC Transfer Tools</h3>
+              <h3>Viewer Transfer Tools</h3>
               <p className="pm-help">
-                Recommendation: open noVNC in a new tab first, then use the noVNC toolbar for clipboard and fullscreen.
+                Drag files into staging, then use RDP drive sharing (Windows) or SCP/SSH (Linux) for transfer.
               </p>
+              <div
+                className="pm-dropzone"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  handleTransferDrop(event.dataTransfer.files);
+                }}
+              >
+                <p>Drop files here for transfer staging</p>
+                <label className="pm-upload-btn">
+                  Select files
+                  <input
+                    type="file"
+                    multiple
+                    onChange={(event) => handleTransferDrop(event.target.files)}
+                  />
+                </label>
+              </div>
+              {droppedFiles.length > 0 ? (
+                <div className="pm-file-list">
+                  {droppedFiles.map((file, index) => (
+                    <p key={`${file.name}-${index}`}>{file.name}</p>
+                  ))}
+                  {activeVm ? (
+                    <button
+                      className="btn btn-primary"
+                      disabled={uploadingFiles}
+                      onClick={() => void uploadFilesToVm(activeVm)}
+                    >
+                      {uploadingFiles ? "Sending..." : "Send files to VM Downloads"}
+                    </button>
+                  ) : null}
+                  <button className="btn btn-ghost" onClick={() => setDroppedFiles([])}>
+                    Clear staged files
+                  </button>
+                </div>
+              ) : null}
               <textarea
                 value={clipboardText}
                 onChange={(event) => setClipboardText(event.target.value)}
-                placeholder="Prepare text here, then paste it in noVNC with Ctrl/Cmd+V."
+                placeholder="Prepare text here, then paste it in the VM viewer with Ctrl/Cmd+V."
               />
               <div className="pm-clipboard-actions">
                 <button

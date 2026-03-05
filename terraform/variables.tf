@@ -44,6 +44,12 @@ variable "vm_lifetime_minutes" {
   default     = 60
 }
 
+variable "vm_provisioning_timeout_minutes" {
+  description = "Timeout for VM provisioning operations in backend logic."
+  type        = number
+  default     = 15
+}
+
 variable "monthly_budget_chf" {
   description = "Monthly budget target in CHF (for app config + alerting reference)."
   type        = number
@@ -59,13 +65,25 @@ variable "vm_admin_username" {
 variable "vm_size_linux" {
   description = "Default Linux VM size."
   type        = string
-  default     = "Standard_B1s"
+  default     = "Standard_D2s_v5"
 }
 
 variable "vm_size_windows" {
   description = "Default Windows VM size."
   type        = string
-  default     = "Standard_B1s"
+  default     = "Standard_D4s_v5"
+}
+
+variable "gateway_vm_size" {
+  description = "Size of the central Guacamole gateway VM."
+  type        = string
+  default     = "Standard_D4s_v5"
+}
+
+variable "function_plan_sku" {
+  description = "App Service plan SKU for Function App (EP1 recommended for low latency)."
+  type        = string
+  default     = "EP1"
 }
 
 variable "orchestrator_api_key" {

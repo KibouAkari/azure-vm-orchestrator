@@ -30,6 +30,9 @@ fi
 echo "\n[1/5] Azure login check..."
 az account show >/dev/null 2>&1 || az login >/dev/null
 
+echo "Ensuring Kali marketplace terms are accepted..."
+az vm image terms accept --publisher kali-linux --offer kali --plan kali-2025-4 >/dev/null || true
+
 echo "\n[2/5] Deploying infrastructure with Terraform..."
 pushd "$TF_DIR" >/dev/null
 terraform init -upgrade

@@ -1,60 +1,125 @@
 # Azure VM Orchestrator
 
-Production-oriented starter kit for managing short-lived Azure VMs from a modern web app.
+<p align="center">
+  Browser-first VM lab orchestration on Azure with a modern Next.js control plane.
+</p>
 
-## What This Project Does
+<p align="center">
+  <img alt="Frontend" src="https://img.shields.io/badge/Frontend-Next.js-111827?style=for-the-badge&logo=nextdotjs" />
+  <img alt="Backend" src="https://img.shields.io/badge/Backend-Azure%20Functions-0EA5E9?style=for-the-badge&logo=microsoftazure" />
+  <img alt="Infra" src="https://img.shields.io/badge/Infra-Terraform-7C3AED?style=for-the-badge&logo=terraform" />
+  <img alt="Cloud" src="https://img.shields.io/badge/Cloud-Azure-2563EB?style=for-the-badge&logo=microsoftazure" />
+</p>
 
-- Deploys a **public web app** on Vercel (`*.vercel.app`)
-- Uses Azure Functions as orchestration backend
-- Creates, pauses, resumes, extends, and terminates Azure VMs
-- Supports multiple concurrent VMs and split viewer access in the UI
-- Enforces automatic VM expiration (default TTL: 60 minutes)
+---
+
+## Why this project exists
+
+Azure VM Orchestrator gives you a single web UI to spin up short-lived Linux/Windows lab machines in Azure, open them in the browser, and clean them up automatically.
+
+It is optimized for:
+
+- Fast classroom/lab onboarding
+- Cost-controlled temporary environments
+- Multi-user sessions with ownership isolation
+- Browser-native access through a central gateway
+
+---
+
+## Key capabilities
+
+### VM lifecycle
+
+- Create VMs from Azure marketplace images or custom managed images
+- Pause, resume, extend, and terminate VMs from the dashboard
+- Auto-expiration and cleanup based on TTL
+
+### Browser access
+
+- Central Guacamole gateway for Linux and Windows sessions
+- Viewer readiness/progress status in the UI
+- File transfer workflow and clipboard helper tools
+
+### Image workflow
+
+- Upload `.vhd` / `.vhdx` / `.img` files to Azure Storage
+- Convert uploaded files into managed images
+- Assign images to custom areas/topics for simplified launch flows
+
+### Performance-oriented orchestration
+
+- Premium Azure Functions hosting with `always_on`
+- Pre-warmed pool logic for topic-specific starts
+- Async gateway registration and optimized VM list/status refresh paths
+
+---
 
 ## Architecture
 
-- **Frontend:** Next.js (`frontend/web`)
-- **API Gateway/Proxy:** Next.js server routes (`frontend/web/app/api/orchestrator/...`)
-- **Backend:** Azure Functions (`backend/functions`)
-- **Infra as Code:** Terraform (`terraform`)
+| Layer | Tech | Purpose |
+|---|---|---|
+| Frontend | Next.js App Router | Dashboard, image menu, user interactions |
+| Frontend API proxy | Next.js Route Handlers | Auth/header forwarding and payload normalization |
+| Backend | Azure Functions (TypeScript) | VM orchestration and business logic |
+| Cloud APIs | Azure SDKs | Compute, network, storage operations |
+| Infra as Code | Terraform | Provision Azure resources and app settings |
 
-## Core Features
+Core directories:
 
-- VM lifecycle controls: `Create`, `Pause`, `Resume`, `Extend +2h`, `Terminate`
-- Auto-cleanup of expired VMs
-- noVNC access flow with in-app viewer + open-in-new-tab option
-- Clipboard helper controls (`Paste`/`Copy`)
-- Session-based user isolation for VM lists/actions
+- `frontend/web` — web app and proxy API routes
+- `backend/functions` — orchestration functions
+- `terraform` — Azure infrastructure definitions
+- `scripts/deploy_vercel_azure.sh` — fastest deployment script
 
-## Security Model (Current)
+---
 
-- API key required between frontend proxy and backend
-- Ownership tags on VMs (`ownerId`) checked for mutations
-- Secrets expected in local env/tfvars and cloud environment variables
-- Sensitive files are ignored by `.gitignore`
+## Security and isolation model
 
-## Fastest Way to Run It
+- API key between frontend proxy and backend
+- Per-session user ownership tags on managed VMs
+- Backend-side ownership checks before VM mutations
+- Sensitive values provided via Terraform variables and app settings
 
-Use the complete from-zero guide:
+This is session-based isolation. For strict enterprise identity separation, add real auth (for example Microsoft Entra ID).
 
-- [QUICK_DEPLOY.md](QUICK_DEPLOY.md)
+---
 
-That guide starts with only:
-- an Azure subscription,
-- a Vercel account,
-- and this repository.
+## Requirements
 
-## Repository Layout
+- Azure subscription
+- Vercel account
+- Terraform `>= 1.6`
+- Azure CLI
+- Node.js `>= 20` (22 LTS recommended)
+- npm
+- zip
 
-- `terraform/` Infrastructure resources (RG, networking, Function App, settings)
-- `backend/functions/` VM orchestration handlers and Azure SDK logic
-- `frontend/web/` Dashboard UI and proxy API routes
-- `scripts/deploy_vercel_azure.sh` Mostly-automated deployment script
-- `QUICK_DEPLOY.md` End-to-end operational guide
+---
 
-## Important Notes
+## Quick start
 
-- Default region is configured for `switzerlandnorth`.
-- Public URLs can be used without buying a custom domain:
+Use the full guide in [QUICK_DEPLOY.md](QUICK_DEPLOY.md).
+
+Minimal flow:
+
+1. Install prerequisites
+2. Create `terraform/terraform.tfvars`
+3. Run `az login` and `vercel login`
+4. Execute `./scripts/deploy_vercel_azure.sh`
+
+---
+
+## Operational notes
+
+- Default Azure region is `switzerlandnorth`
+- Public URLs work without custom domains:
   - Vercel: `*.vercel.app`
-  - Azure Function App: `*.azurewebsites.net`
-- For stronger multi-user isolation, add real auth (Entra/NextAuth) in a future step.
+  - Azure Function API: `*.azurewebsites.net`
+- On occasional Azure API hiccups during Terraform apply, rerun the command (guide includes fallback steps)
+
+---
+
+## Documentation
+
+- Full setup and deployment: [QUICK_DEPLOY.md](QUICK_DEPLOY.md)
+

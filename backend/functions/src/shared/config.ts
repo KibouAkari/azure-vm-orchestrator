@@ -9,7 +9,12 @@ export type OrchestratorConfig = {
   vmAdminUsername: string;
   vmSizeLinux: string;
   vmSizeWindows: string;
+  vmProvisioningTimeoutMin: number;
   apiKey: string;
+  gatewayVmName: string;
+  gatewayBaseUrl: string;
+  imageStorageAccount: string;
+  imageStorageContainer: string;
 };
 
 function requireEnv(name: string): string {
@@ -32,6 +37,11 @@ export function getConfig(): OrchestratorConfig {
     vmAdminUsername: process.env.ORCH_VM_ADMIN_USERNAME ?? "azureuser",
     vmSizeLinux: process.env.ORCH_VM_SIZE_LINUX ?? "Standard_B1s",
     vmSizeWindows: process.env.ORCH_VM_SIZE_WINDOWS ?? "Standard_B1s",
-    apiKey: requireEnv("ORCH_API_KEY")
+    vmProvisioningTimeoutMin: Number(process.env.ORCH_VM_PROVISIONING_TIMEOUT_MIN ?? "15"),
+    apiKey: requireEnv("ORCH_API_KEY"),
+    gatewayVmName: requireEnv("ORCH_GATEWAY_VM_NAME"),
+    gatewayBaseUrl: requireEnv("ORCH_GATEWAY_BASE_URL"),
+    imageStorageAccount: requireEnv("ORCH_IMAGE_STORAGE_ACCOUNT"),
+    imageStorageContainer: process.env.ORCH_IMAGE_STORAGE_CONTAINER ?? "custom-images"
   };
 }

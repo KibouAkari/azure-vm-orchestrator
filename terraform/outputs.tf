@@ -17,3 +17,19 @@ output "vm_subnet_id" {
   value       = azurerm_subnet.vm.id
   description = "Subnet ID where short-lived VMs should be created."
 }
+
+output "gateway_vm_name" {
+  value       = azurerm_linux_virtual_machine.gateway.name
+  description = "Central gateway VM name used by backend to manage shared Guacamole connections."
+}
+
+output "gateway_base_url" {
+  value       = "https://${replace(azurerm_public_ip.gateway.ip_address, ".", "-")}.sslip.io"
+  description = "Public browser URL of the central Guacamole gateway."
+}
+
+output "gateway_admin_password" {
+  value       = random_password.gateway_admin.result
+  sensitive   = true
+  description = "Generated local admin password for the gateway VM."
+}

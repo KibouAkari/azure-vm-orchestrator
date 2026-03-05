@@ -2,6 +2,7 @@ data "azurerm_client_config" "current" {}
 
 locals {
   prefix = lower(replace("${var.project_name}-${var.environment}", "_", "-"))
+  storage_account_prefix = substr(replace(lower(replace("${var.project_name}-${var.environment}", "_", "-")), "-", ""), 0, 17)
 
   common_tags = merge(
     {
@@ -19,6 +20,12 @@ resource "random_string" "suffix" {
   upper   = false
   special = false
   numeric = true
+}
+
+resource "random_password" "gateway_admin" {
+  length           = 24
+  special          = true
+  override_special = "!@#%-_=+"
 }
 
 resource "azurerm_resource_group" "main" {
@@ -91,13 +98,176 @@ resource "azurerm_network_security_rule" "allow_ssh" {
   network_security_group_name = azurerm_network_security_group.vm.name
 }
 
+resource "azurerm_network_security_rule" "allow_novnc_web" {
+  name                        = "allow-novnc-web"
+  priority                    = 130
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "6080"
+  source_address_prefix       = var.allowed_client_cidr
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.vm.name
+}
+
+resource "azurerm_network_security_rule" "allow_http" {
+  name                        = "allow-http"
+  priority                    = 131
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "80"
+  source_address_prefix       = var.allowed_client_cidr
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.vm.name
+}
+
+resource "azurerm_network_security_rule" "allow_https" {
+  name                        = "allow-https"
+  priority                    = 132
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "443"
+  source_address_prefix       = var.allowed_client_cidr
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.main.name
+  network_security_group_name = azurerm_network_security_group.vm.name
+}
+
 resource "azurerm_subnet_network_security_group_association" "vm" {
   subnet_id                 = azurerm_subnet.vm.id
   network_security_group_id = azurerm_network_security_group.vm.id
 }
 
+resource "azurerm_public_ip" "gateway" {
+  name                = "pip-gateway-${local.prefix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = local.common_tags
+}
+
+resource "azurerm_network_interface" "gateway" {
+  name                = "nic-gateway-${local.prefix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+
+  ip_configuration {
+    name                          = "ipconfig1"
+    subnet_id                     = azurerm_subnet.vm.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.gateway.id
+  }
+
+  tags = local.common_tags
+}
+
+resource "azurerm_linux_virtual_machine" "gateway" {
+  name                  = "vm-gateway-${local.prefix}"
+  location              = azurerm_resource_group.main.location
+  resource_group_name   = azurerm_resource_group.main.name
+  size                  = var.gateway_vm_size
+  admin_username        = var.vm_admin_username
+  admin_password        = random_password.gateway_admin.result
+  disable_password_authentication = false
+  network_interface_ids = [azurerm_network_interface.gateway.id]
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "StandardSSD_LRS"
+  }
+
+  custom_data = base64encode(<<-CLOUD_INIT
+    #cloud-config
+    package_update: true
+    packages:
+      - docker.io
+      - caddy
+      - python3
+      - curl
+    write_files:
+      - path: /opt/guac/user-mapping.xml
+        permissions: "0644"
+        content: |
+          <user-mapping>
+            <authorize username="viewer" password="viewer">
+            </authorize>
+          </user-mapping>
+
+      - path: /opt/guac/guacamole.properties
+        permissions: "0644"
+        content: |
+          guacd-hostname: 127.0.0.1
+          guacd-port: 4822
+          user-mapping: /opt/guac/user-mapping.xml
+
+      - path: /usr/local/bin/bootstrap-gateway.sh
+        permissions: "0755"
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          mkdir -p /opt/guac
+
+          systemctl enable docker
+          systemctl restart docker
+
+          docker rm -f guacd guacamole >/dev/null 2>&1 || true
+          docker pull guacamole/guacd:1.5.5
+          docker pull guacamole/guacamole:1.5.5
+
+          docker run -d --name guacd --restart unless-stopped --network host guacamole/guacd:1.5.5
+          docker run -d --name guacamole --restart unless-stopped --network host \
+            -e GUACD_HOSTNAME=127.0.0.1 \
+            -e GUACD_PORT=4822 \
+            -e GUACAMOLE_HOME=/opt/guac \
+            -v /opt/guac:/opt/guac \
+            guacamole/guacamole:1.5.5
+
+          PUBLIC_IP="$(curl -s -H Metadata:true 'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' || true)"
+          if [[ -z "$${PUBLIC_IP:-}" ]]; then
+            exit 0
+          fi
+
+          HOST="$${PUBLIC_IP//./-}.sslip.io"
+          cat > /etc/caddy/Caddyfile <<EOF
+          $${HOST} {
+            reverse_proxy 127.0.0.1:8080
+            header {
+              -X-Frame-Options
+              -Content-Security-Policy
+            }
+          }
+          EOF
+
+          systemctl enable caddy
+          systemctl restart caddy
+    runcmd:
+      - /usr/local/bin/bootstrap-gateway.sh
+    CLOUD_INIT
+  )
+
+  tags = merge(local.common_tags, {
+    role = "central-gateway"
+  })
+}
+
 resource "azurerm_storage_account" "functions" {
-  name                     = "st${replace(local.prefix, "-", "")}${random_string.suffix.result}"
+  name                     = "st${local.storage_account_prefix}${random_string.suffix.result}"
   resource_group_name      = azurerm_resource_group.main.name
   location                 = azurerm_resource_group.main.location
   account_tier             = "Standard"
@@ -106,12 +276,18 @@ resource "azurerm_storage_account" "functions" {
   tags                     = local.common_tags
 }
 
+resource "azurerm_storage_container" "custom_images" {
+  name                  = "custom-images"
+  storage_account_id    = azurerm_storage_account.functions.id
+  container_access_type = "private"
+}
+
 resource "azurerm_service_plan" "functions" {
   name                = "asp-${local.prefix}"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   os_type             = "Linux"
-  sku_name            = "Y1"
+  sku_name            = var.function_plan_sku
   tags                = local.common_tags
 }
 
@@ -138,7 +314,7 @@ resource "azurerm_linux_function_app" "orchestrator" {
   }
 
   site_config {
-    always_on = false
+    always_on = true
     cors {
       allowed_origins = [var.frontend_origin]
     }
@@ -161,10 +337,15 @@ resource "azurerm_linux_function_app" "orchestrator" {
     "ORCH_ALLOWED_CLIENT_CIDR" = var.allowed_client_cidr
     "ORCH_MAX_PARALLEL_VMS"    = tostring(var.max_parallel_vms)
     "ORCH_VM_LIFETIME_MIN"     = tostring(var.vm_lifetime_minutes)
+    "ORCH_VM_PROVISIONING_TIMEOUT_MIN" = tostring(var.vm_provisioning_timeout_minutes)
     "ORCH_MONTHLY_BUDGET_CHF"  = tostring(var.monthly_budget_chf)
     "ORCH_VM_ADMIN_USERNAME"   = var.vm_admin_username
     "ORCH_VM_SIZE_LINUX"       = var.vm_size_linux
     "ORCH_VM_SIZE_WINDOWS"     = var.vm_size_windows
+    "ORCH_GATEWAY_VM_NAME"     = azurerm_linux_virtual_machine.gateway.name
+    "ORCH_GATEWAY_BASE_URL"    = "https://${replace(azurerm_public_ip.gateway.ip_address, ".", "-")}.sslip.io"
+    "ORCH_IMAGE_STORAGE_ACCOUNT" = azurerm_storage_account.functions.name
+    "ORCH_IMAGE_STORAGE_CONTAINER" = azurerm_storage_container.custom_images.name
     "ORCH_API_KEY"             = var.orchestrator_api_key
   }
 }
@@ -172,5 +353,11 @@ resource "azurerm_linux_function_app" "orchestrator" {
 resource "azurerm_role_assignment" "function_rg_contributor" {
   scope                = azurerm_resource_group.main.id
   role_definition_name = "Contributor"
+  principal_id         = azurerm_linux_function_app.orchestrator.identity[0].principal_id
+}
+
+resource "azurerm_role_assignment" "function_storage_blob_data_contributor" {
+  scope                = azurerm_storage_account.functions.id
+  role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_linux_function_app.orchestrator.identity[0].principal_id
 }

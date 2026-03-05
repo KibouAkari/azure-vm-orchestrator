@@ -1,210 +1,275 @@
-# Quick Deploy — Complete Guide (From Zero to Live)
+# Quick Deploy Guide
 
-This is the **single source of truth** to go from:
-
-- Azure subscription 
-- Vercel account 
-- local code checkout 
-
-to a fully working public app:
-
-- Frontend on `https://<your-project>.vercel.app`
-- Backend on Azure Functions
-- VM lifecycle controls from the UI
+<p align="center">
+	<strong>From zero to production in the fastest practical CLI-first flow.</strong><br/>
+	Azure + Terraform + Vercel, with minimal manual steps.
+</p>
 
 ---
 
-## 0) What you get at the end
+## What you will have at the end
 
-- Create Azure VMs from the web UI
-- Loading state while VM is being provisioned
-- Access VM through viewer/noVNC when ready
-- `Paste` / `Copy` helper controls in UI
-- Auto-expiration after 60 minutes (default)
-- Manual `Pause`, `Resume`, `Terminate`
-- Multiple VMs per user, with session-level isolation
+- Public frontend on Vercel
+- Backend API on Azure Functions
+- Terraform-managed Azure infrastructure
+- Browser-accessible Linux/Windows lab VMs
+- One-command redeploy path for daily updates
 
 ---
 
-## 1) One-time local prerequisites
+## 1) Prerequisites (install once)
 
-Install these tools locally:
+You need these tools:
 
-- Terraform `>= 1.6`
-- Azure CLI (`az`)
-- Node.js `>= 20`
-- npm
-- Vercel CLI (optional, script can install it automatically)
+- Azure CLI
+- Terraform (>= 1.6)
+- Node.js (>= 20, recommended: 22 LTS) + npm
+- Vercel CLI
+- zip
 
-Verify:
+### macOS (Homebrew)
 
 ```bash
-terraform -version
+brew update
+brew install azure-cli terraform node
+brew install zip
+npm install -g vercel@latest
+```
+
+### Ubuntu / Debian
+
+```bash
+sudo apt-get update
+sudo apt-get install -y curl unzip zip gnupg software-properties-common
+
+# Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+# Terraform
+wget -O- https://apt.releases.hashicorp.com/gpg | \
+	gpg --dearmor | \
+	sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+	sudo tee /etc/apt/sources.list.d/hashicorp.list
+sudo apt-get update && sudo apt-get install -y terraform
+
+# Node.js 22 LTS
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# Vercel CLI
+sudo npm install -g vercel@latest
+```
+
+### Windows (PowerShell, winget)
+
+```powershell
+winget install Microsoft.AzureCLI
+winget install Hashicorp.Terraform
+winget install OpenJS.NodeJS.LTS
+npm install -g vercel@latest
+```
+
+### Verify installation
+
+```bash
 az version
+terraform -version
 node -v
 npm -v
+vercel --version
+zip -v
 ```
 
 ---
 
-## 2) Clone and enter project
+## 2) Clone repository
 
 ```bash
-git clone <your-repo-url>
+git clone <your-repository-url>
 cd azure-vm-orchestrator
 ```
 
 ---
 
-## 3) Create your Terraform config file (required)
+## 3) Configure Terraform variables
+
+If `terraform/terraform.tfvars.example` exists:
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-```
-
-Open `terraform.tfvars` and set real values:
-
-- `subscription_id`
-- `tenant_id`
-- `client_id`
-- `client_secret`
-- `orchestrator_api_key` (choose a strong secret)
-- `frontend_origin` (use `https://<your-project>.vercel.app` after first deploy)
-
-Optional:
-
-- `allowed_client_cidr` (IP restriction)
-
-Return to project root:
-
-```bash
 cd ..
 ```
 
+If it does not exist, create `terraform/terraform.tfvars` manually:
+
+```hcl
+subscription_id       = "<azure-subscription-id>"
+tenant_id             = "<azure-tenant-id>"
+orchestrator_api_key  = "<very-strong-random-secret>"
+frontend_origin       = "https://your-project.vercel.app"
+
+# Optional
+allowed_client_cidr   = "0.0.0.0/0"
+location              = "switzerlandnorth"
+```
+
+Minimum required values:
+
+- `subscription_id`
+- `tenant_id`
+- `orchestrator_api_key`
+- `frontend_origin`
+
 ---
 
-## 4) Login to Azure and Vercel
+## 4) Login (CLI-first)
 
 ```bash
 az login
+az account set --subscription "<your-subscription-id>"
 vercel login
 ```
 
-> `vercel login` is usually needed only once.
+Tip: `vercel login` is usually needed only once per machine.
 
 ---
 
-## 5) Run the automation script (main path)
+## 5) Fast deploy (recommended)
+
+Run the deployment script from repository root:
 
 ```bash
 chmod +x scripts/deploy_vercel_azure.sh
 ./scripts/deploy_vercel_azure.sh
 ```
 
-What this script does automatically:
+The script performs:
 
-1. `terraform init` + `terraform apply`
-2. Build + package Azure Functions backend
-3. Deploy backend to your Function App
-4. Deploy frontend to Vercel (production)
-5. Print public URLs
-
----
-
-## 6) Validate that everything works
-
-After script completion, open your Vercel URL.
-
-Check this flow:
-
-1. Create VM
-2. Wait for loading/provisioning
-3. VM appears in list
-4. Open viewer/noVNC
-5. Try `Pause` then `Resume`
-6. Try `Extend +2h`
-7. Try `Terminate`
-
-If noVNC in iframe is limited in your browser:
-
-- use **Open noVNC in new tab** for best fullscreen/clipboard behavior.
+1. Terraform init + apply
+2. Backend build and zip packaging
+3. Azure Function App zip deployment
+4. Frontend deployment to Vercel
+5. Output of live URLs
 
 ---
 
-## 7) Multi-user behavior (important)
+## 6) Post-deploy checks
 
-Current implementation provides **session-based** user separation:
+Open your Vercel URL and validate:
 
-- each browser session gets a generated user ID cookie
-- users only see/manage VMs tagged with their owner ID
+1. Dashboard loads
+2. Create VM works
+3. Viewer status progresses to ready
+4. Pause / Resume / Extend / Terminate work
+5. Image Menu is reachable and functional
 
-If you need strict identity-level separation (work/school accounts), add real auth (e.g., Microsoft Entra + NextAuth) as a next step.
+Optional backend health check:
+
+```bash
+API_KEY="<same orchestrator_api_key from terraform.tfvars>"
+curl -s -H "x-api-key: $API_KEY" -H "x-user-id: smoke-test" \
+	"https://<your-function-app>.azurewebsites.net/api/orchestrator/vms"
+```
 
 ---
 
-## 8) VM expiration and cost control
+## 7) Known reliability fallback (if script partially fails)
 
-- Default VM TTL is 60 minutes (`ORCH_VM_LIFETIME_MIN`)
-- Expired VMs are auto-cleaned by backend cleanup job
-- Use `Pause` to save compute costs
-- Use `Terminate` when done
+Sometimes Terraform can fail with transient Azure API read/reset errors during app settings operations.
 
----
+### Safe retry path
 
-## 9) Re-deploy after code changes
-
-Any time you change frontend/backend/infra:
+Run the script again:
 
 ```bash
 ./scripts/deploy_vercel_azure.sh
 ```
 
----
+### Backend-only deploy fallback
 
-## 10) Common issues and quick fixes
-
-### A) `terraform.tfvars` missing
-
-Create it from example:
+If infra already exists and only backend code changed:
 
 ```bash
-cd terraform && cp terraform.tfvars.example terraform.tfvars
+cd backend/functions
+npm install
+npm run build
+
+TMP_DIR=$(mktemp -d)
+cp -R dist "$TMP_DIR/"
+cp host.json package.json "$TMP_DIR/"
+[ -f package-lock.json ] && cp package-lock.json "$TMP_DIR/"
+
+cd "$TMP_DIR"
+npm install --omit=dev --ignore-scripts
+zip -qr functionapp.zip .
+
+az functionapp deployment source config-zip \
+	--name "<function-app-name>" \
+	--resource-group "<resource-group-name>" \
+	--src "$TMP_DIR/functionapp.zip"
 ```
-
-### B) `Unauthorized` API errors
-
-Ensure same key is used end-to-end:
-
-- `orchestrator_api_key` in `terraform.tfvars`
-- frontend env values set by deploy script
-
-### C) Vercel asks project/link questions
-
-Normal on first run. Complete prompts once; later runs are mostly automatic.
-
-### D) Viewer opens but clipboard/fullscreen is inconsistent
-
-Open noVNC in a new tab and use noVNC toolbar there.
-
-### E) You want a public URL without paying for a domain
-
-You already have it:
-
-- Vercel gives `*.vercel.app`
-- Azure gives `*.azurewebsites.net`
 
 ---
 
-## 11) Minimal command recap
+## 8) Daily workflow (very fast)
 
-If tools are installed and `terraform.tfvars` is ready:
+For normal changes:
+
+```bash
+./scripts/deploy_vercel_azure.sh
+```
+
+For frontend-only changes:
+
+```bash
+cd frontend/web
+npm install
+vercel deploy --prod
+```
+
+---
+
+## 9) Important configuration notes
+
+- Default region is `switzerlandnorth`
+- Function runtime is configured for Node.js 20 in Azure
+- Local development should use Node.js 20+ (22 LTS recommended)
+- VMs are session-scoped in current isolation model
+- VM TTL defaults to `ORCH_VM_LIFETIME_MIN=60`
+
+---
+
+## 10) Troubleshooting quick list
+
+### `Unauthorized` from orchestrator API
+
+Check that `orchestrator_api_key` in Terraform matches what frontend uses.
+
+### Terraform apply fails with transient Azure errors
+
+Retry the command. Most failures are temporary control-plane/API interruptions.
+
+### Vercel asks to link project
+
+Complete prompts once; subsequent deploys are usually non-interactive.
+
+### Viewer is slow to become ready
+
+This can happen when no matching pre-warmed VM is available and a full start is required.
+
+---
+
+## 11) One-screen command recap
 
 ```bash
 az login
+az account set --subscription "<your-subscription-id>"
 vercel login
+
 chmod +x scripts/deploy_vercel_azure.sh
 ./scripts/deploy_vercel_azure.sh
 ```
 
-That is the fastest practical path from zero to a live working deployment.
+That is the fastest complete path for initial setup and repeated deployments.
